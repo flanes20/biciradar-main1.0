@@ -1,0 +1,72 @@
+[
+  {
+    "id": "crv-providencia",
+    "lat": -33.4373,
+    "lng": -70.6345,
+    "comuna": "Providencia",
+    "ruta": "Av. Andrés Bello (Plaza Italia → Andrés de Fuenzalida)",
+    "dias": "Domingos",
+    "horario": "09:00 a 14:00",
+    "descripcion": "Calle cerrada a autos. Puntos de reparación de bicis y dispensadores de agua y fruta."
+  },
+  {
+    "id": "crv-nunoa",
+    "lat": -33.4558,
+    "lng": -70.5969,
+    "comuna": "Ñuñoa",
+    "ruta": "Av. Irarrázaval y Av. Cardenal Caro",
+    "dias": "Domingos",
+    "horario": "09:00 a 14:00",
+    "descripcion": "Circuito recreativo para ciclistas, peatones y patinadores."
+  },
+  {
+    "id": "crv-lascondes",
+    "lat": -33.4091,
+    "lng": -70.5680,
+    "comuna": "Las Condes",
+    "ruta": "Av. Apoquindo",
+    "dias": "Domingos",
+    "horario": "09:00 a 14:00",
+    "descripcion": "Vía recreativa con calles cerradas al transporte motorizado."
+  },
+  {
+    "id": "crv-vitacura",
+    "lat": -33.3899,
+    "lng": -70.5790,
+    "comuna": "Vitacura",
+    "ruta": "Av. Vitacura",
+    "dias": "Domingos",
+    "horario": "09:00 a 14:00",
+    "descripcion": "Circuito recreativo familiar para deporte y paseo."
+  },
+  {
+    "id": "crv-santiago",
+    "lat": -33.4515,
+    "lng": -70.6620,
+    "comuna": "Santiago Centro",
+    "ruta": "Calles Abiertas STGO",
+    "dias": "Domingos",
+    "horario": "09:00 a 14:00",
+    "descripcion": "Programa Calles Abiertas: ejes cerrados a autos para uso recreativo."
+  },
+  {
+    "id": "crv-renca",
+    "lat": -33.4045,
+    "lng": -70.7280,
+    "comuna": "Renca",
+    "ruta": "Circuito CicloRecreoVía Renca",
+    "dias": "Domingos",
+    "horario": "09:00 a 14:00",
+    "descripcion": "Vía recreativa comunal para ciclistas y peatones."
+  },
+  {
+    "id": "crv-parquemet",
+    "lat": -33.4265,
+    "lng": -70.6310,
+    "comuna": "Parque Metropolitano",
+    "ruta": "Acceso Pío Nono / Cerro San Cristóbal",
+    "dias": "Sábados y Domingos",
+    "horario": "09:00 a 14:00",
+    "descripcion": "Subida recreativa al cerro cerrada a vehículos."
+  }
+]
