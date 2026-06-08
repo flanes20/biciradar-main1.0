@@ -29,6 +29,10 @@ dependencies:
   sensors_plus: ^6.1.1
   flutter_local_notifications: ^18.0.1
 
+  # Compartir resumen como imagen (redes sociales)
+  share_plus: ^10.1.4
+  path_provider: ^2.1.4
+
   # UI
   cupertino_icons: ^1.0.8
 

@@ -153,6 +153,16 @@ class _MapPageState extends State<MapPage> {
   bool _proximityAlertsEnabled = true;
   bool _fallDialogOpen = false;
 
+  // ── Modo pasajero: detectar por velocidad si vas en auto/micro/metro ──────
+  // Una bici urbana rara vez sostiene >32 km/h; si pasa, preguntamos si es
+  // pasajero para NO contar esos km como pedaleo (calidad de las estadísticas).
+  bool _isPassenger = false;
+  String _passengerVehicle = 'auto'; // 'auto' | 'micro' | 'metro'
+  bool _passengerPromptOpen = false;
+  DateTime? _highSpeedSince;
+  DateTime? _lowSpeedSince;
+  DateTime? _passengerSnoozeUntil;
+
   // Timer para modo oscuro automático
   Timer? _styleCheckTimer;
   String _currentStyle = kMapStyleNight;
@@ -518,11 +528,16 @@ class _MapPageState extends State<MapPage> {
     ).listen((position) async {
       if (!mounted) return;
 
-      _speedNotifier.value = position.speed < 0 ? 0 : position.speed * 3.6;
+      final curSpeedKmh = position.speed < 0 ? 0.0 : position.speed * 3.6;
+      _speedNotifier.value = curSpeedKmh;
+
+      // Detección de modo pasajero (auto/micro/metro) según la velocidad.
+      _maybeHandlePassengerMode(curSpeedKmh);
 
       // Tracking de km — solo cuenta cuando el usuario realmente se mueve,
-      // para no sumar el "ruido" del GPS estando quieto.
-      if (_modoActivo && _lastPosition != null) {
+      // para no sumar el "ruido" del GPS estando quieto. En modo pasajero NO
+      // se cuenta (esos km no son pedaleo).
+      if (_modoActivo && !_isPassenger && _lastPosition != null) {
         final distM = geo.Geolocator.distanceBetween(
           _lastPosition!.latitude,
           _lastPosition!.longitude,
@@ -576,6 +591,116 @@ class _MapPageState extends State<MapPage> {
     _positionStreamSubscription?.cancel();
     _positionStreamSubscription = null;
     _startFollowing();
+  }
+
+  // ── Modo pasajero ─────────────────────────────────────────────────────────
+
+  /// Evalúa la velocidad para entrar/salir del modo pasajero.
+  void _maybeHandlePassengerMode(double speedKmh) {
+    const highKmh = 32.0; // sobre esto, difícil que sea pedaleo
+    const lowKmh = 6.0; // bajo esto, probablemente ya bajaste del vehículo
+    final now = DateTime.now();
+
+    if (_isPassenger) {
+      _highSpeedSince = null;
+      // Salir automáticamente si la velocidad baja de forma sostenida.
+      if (speedKmh < lowKmh) {
+        _lowSpeedSince ??= now;
+        if (now.difference(_lowSpeedSince!) > const Duration(seconds: 15)) {
+          _exitPassengerMode(auto: true);
+        }
+      } else {
+        _lowSpeedSince = null;
+      }
+      return;
+    }
+
+    // No es pasajero: ¿lleva varios segundos a velocidad de vehículo?
+    if (speedKmh >= highKmh) {
+      _highSpeedSince ??= now;
+      final sustained =
+          now.difference(_highSpeedSince!) > const Duration(seconds: 6);
+      final snoozed = _passengerSnoozeUntil != null &&
+          now.isBefore(_passengerSnoozeUntil!);
+      if (sustained && !_passengerPromptOpen && !snoozed && mounted) {
+        _showPassengerPrompt();
+      }
+    } else {
+      _highSpeedSince = null;
+    }
+  }
+
+  Future<void> _showPassengerPrompt() async {
+    _passengerPromptOpen = true;
+    HapticFeedback.mediumImpact();
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withOpacity(0.65),
+      builder: (_) => _PassengerPrompt(speedKmh: _speedNotifier.value.round()),
+    );
+    _passengerPromptOpen = false;
+    if (!mounted) return;
+
+    if (result == null || result == 'bici') {
+      // Sigo pedaleando: no volver a preguntar por un rato.
+      _passengerSnoozeUntil = DateTime.now().add(const Duration(minutes: 5));
+      _highSpeedSince = null;
+    } else {
+      _enterPassengerMode(result); // 'auto' | 'micro' | 'metro'
+    }
+  }
+
+  void _enterPassengerMode(String vehicle) {
+    // Guardar km pendientes antes de dejar de contar.
+    if (_unsavedKm > 0) {
+      _saveKmToProfile(_unsavedKm);
+      RideStatsService.addKm(_unsavedKm);
+      _unsavedKm = 0;
+    }
+    _fallService.stop(); // sin falsos positivos por frenadas del vehículo
+    setState(() {
+      _isPassenger = true;
+      _passengerVehicle = vehicle;
+      _lowSpeedSince = null;
+      _highSpeedSince = null;
+    });
+  }
+
+  void _exitPassengerMode({bool auto = false}) {
+    if (_fallDetectionEnabled) _fallService.start(_onFallDetected);
+    setState(() {
+      _isPassenger = false;
+      _lowSpeedSince = null;
+      _highSpeedSince = null;
+      // Tras salir, deja un pequeño margen antes de volver a preguntar.
+      _passengerSnoozeUntil =
+          DateTime.now().add(const Duration(seconds: 30));
+    });
+    if (auto && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('🚴 De vuelta en modo ciclista'),
+          backgroundColor: Colors.green,
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.all(16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      );
+    }
+  }
+
+  ({String emoji, String label}) _vehicleInfo(String v) {
+    switch (v) {
+      case 'micro':
+        return (emoji: '🚌', label: 'Micro');
+      case 'metro':
+        return (emoji: '🚇', label: 'Metro');
+      default:
+        return (emoji: '🚗', label: 'Auto');
+    }
   }
 
   void _listenToActiveCyclists() {
@@ -1910,7 +2035,11 @@ class _MapPageState extends State<MapPage> {
       builder: (context, speed, _) {
         String? mensaje;
         Color mensajeColor = Colors.orangeAccent;
-        if (speed > 35) {
+        if (_isPassenger) {
+          final v = _vehicleInfo(_passengerVehicle);
+          mensaje = "${v.emoji} Vas en ${v.label} · no cuenta como pedaleo";
+          mensajeColor = Colors.lightBlueAccent;
+        } else if (speed > 35) {
           mensaje = "⚠️ ¡MUY RÁPIDO! Considera reducir la velocidad";
           mensajeColor = Colors.redAccent;
         } else if (speed > 30) {
@@ -1984,6 +2113,18 @@ class _MapPageState extends State<MapPage> {
   }
 
   Widget _buildTopBar() {
+    final statusColor =
+        _isPassenger ? Colors.lightBlueAccent : Colors.greenAccent;
+    final vInfo = _vehicleInfo(_passengerVehicle);
+    final statusIcon = _isPassenger
+        ? (_passengerVehicle == 'micro'
+              ? Icons.directions_bus_rounded
+              : _passengerVehicle == 'metro'
+                    ? Icons.subway_rounded
+                    : Icons.directions_car_rounded)
+        : Icons.directions_bike;
+    final statusText =
+        _isPassenger ? 'PASAJERO · ${vInfo.label.toUpperCase()}' : 'CICLISTA ACTIVO';
     return Container(
       decoration: _dayNightBox(radius: 16),
       padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 12),
@@ -1993,11 +2134,11 @@ class _MapPageState extends State<MapPage> {
             width: 8,
             height: 8,
             decoration: BoxDecoration(
-              color: Colors.greenAccent,
+              color: statusColor,
               shape: BoxShape.circle,
               boxShadow: [
                 BoxShadow(
-                  color: Colors.greenAccent.withOpacity(0.6),
+                  color: statusColor.withOpacity(0.6),
                   blurRadius: 6,
                   spreadRadius: 1,
                 ),
@@ -2006,14 +2147,16 @@ class _MapPageState extends State<MapPage> {
           ),
           const SizedBox(width: 8),
           Icon(
-            Icons.directions_bike,
-            color: _isDayMode ? const Color(0xFF00A86B) : Colors.greenAccent,
+            statusIcon,
+            color: _isPassenger
+                ? Colors.lightBlue
+                : (_isDayMode ? const Color(0xFF00A86B) : Colors.greenAccent),
             size: 20,
           ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              "CICLISTA ACTIVO",
+              statusText,
               style: TextStyle(
                 fontFamily: 'Poppins',
                 color: _overlayText,
@@ -2023,7 +2166,31 @@ class _MapPageState extends State<MapPage> {
               ),
             ),
           ),
-          WeatherPill(isDayMode: _isDayMode),
+          if (_isPassenger)
+            GestureDetector(
+              onTap: () => _exitPassengerMode(),
+              child: Container(
+                margin: const EdgeInsets.only(right: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.greenAccent.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.greenAccent.withOpacity(0.4)),
+                ),
+                child: const Text(
+                  '🚴 Pedalear',
+                  style: TextStyle(
+                    fontFamily: 'Poppins',
+                    color: Colors.greenAccent,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            )
+          else
+            WeatherPill(isDayMode: _isDayMode),
         ],
       ),
     );
@@ -3777,6 +3944,25 @@ class _MapPageState extends State<MapPage> {
               ),
             ),
           ),
+          // ── Botón de búsqueda de destino ────────────────────────
+          Positioned(
+            top: 50,
+            left: 64,
+            child: Container(
+              decoration: _dayNightBox(radius: 30),
+              child: IconButton(
+                icon: Icon(
+                  Icons.search,
+                  color: _isDayMode
+                      ? const Color(0xFF00A86B)
+                      : Colors.greenAccent,
+                  size: 22,
+                ),
+                onPressed: _openPlaceSearch,
+                tooltip: 'Buscar destino',
+              ),
+            ),
+          ),
           // ── Botón de pánico ─────────────────────────────────────
           Positioned(bottom: 64, right: 20, child: _PanicButton()),
 
@@ -4059,6 +4245,54 @@ class _MapPageState extends State<MapPage> {
     });
   }
 
+  /// Capas de ciclovías con ancho y opacidad dependientes del zoom:
+  /// finas y tenues al ver toda la ciudad (no saturan el mapa), nítidas al
+  /// acercarte para pedalear. Se eliminó el "glow" que creaba la neblina neón.
+  List<LineLayer> _cicloviaLayers() {
+    return [
+      // Línea principal — celeste suave
+      LineLayer(
+        id: "ciclovias-main-layer",
+        sourceId: "ciclovias-source",
+        lineColor: const Color(0xFF38BDF8).value, // sky-400
+        lineCap: LineCap.ROUND,
+        lineJoin: LineJoin.ROUND,
+        lineWidthExpression: [
+          'interpolate', ['linear'], ['zoom'],
+          11, 0.6,
+          13, 1.4,
+          15, 3.0,
+          17, 5.0,
+        ],
+        lineOpacityExpression: [
+          'interpolate', ['linear'], ['zoom'],
+          11, 0.22,
+          13, 0.45,
+          15, 0.7,
+        ],
+      ),
+      // Centro claro — solo aparece al acercarse, da sensación de carril
+      LineLayer(
+        id: "ciclovias-center-layer",
+        sourceId: "ciclovias-source",
+        lineColor: const Color(0xFFBAE6FD).value, // sky-200
+        lineCap: LineCap.ROUND,
+        lineJoin: LineJoin.ROUND,
+        lineWidthExpression: [
+          'interpolate', ['linear'], ['zoom'],
+          14, 0.0,
+          16, 1.0,
+          18, 1.8,
+        ],
+        lineOpacityExpression: [
+          'interpolate', ['linear'], ['zoom'],
+          14, 0.0,
+          16, 0.6,
+        ],
+      ),
+    ];
+  }
+
   Future<void> _addCicloviasLayer() async {
     if (_cicloviasAdded || mapboxMap == null) return;
     try {
@@ -4072,9 +4306,9 @@ class _MapPageState extends State<MapPage> {
           if (await style.styleLayerExists(lyr)) await style.removeStyleLayer(lyr);
         }
         await style.addSource(GeoJsonSource(id: "ciclovias-source", data: _cicloviasGeoJson!));
-        await style.addLayer(LineLayer(id: "ciclovias-glow-layer", sourceId: "ciclovias-source", lineColor: const Color(0xFF38BDF8).value, lineWidth: 10.0, lineOpacity: 0.18, lineBlur: 3.0));
-        await style.addLayer(LineLayer(id: "ciclovias-main-layer", sourceId: "ciclovias-source", lineColor: const Color(0xFF38BDF8).value, lineWidth: 5.0, lineOpacity: 0.85));
-        await style.addLayer(LineLayer(id: "ciclovias-center-layer", sourceId: "ciclovias-source", lineColor: const Color(0xFFBAE6FD).value, lineWidth: 1.5, lineOpacity: 0.7));
+        for (final l in _cicloviaLayers()) {
+          await style.addLayer(l);
+        }
         _cicloviasAdded = true;
         if (_currentAlerts.isNotEmpty) await _updateAlertsLayer(_currentAlerts);
         if (_currentEvents.isNotEmpty) await _updateEventsLayer(_currentEvents);
@@ -4154,42 +4388,10 @@ class _MapPageState extends State<MapPage> {
           debugPrint("🗑️ Capa $layer eliminada");
         }
       }
-      // Sombra suave exterior
-      await style.addLayer(
-        LineLayer(
-          id: "ciclovias-glow-layer",
-          sourceId: "ciclovias-source",
-          lineColor: const Color(0xFF38BDF8).value, // azul cielo suave
-          lineWidth: 10.0,
-          lineOpacity: 0.18,
-          lineBlur: 3.0,
-        ),
-      );
-      debugPrint("✅ Capa glow agregada");
-      // Línea principal — azul pizarra / celeste apagado
-      await style.addLayer(
-        LineLayer(
-          id: "ciclovias-main-layer",
-          sourceId: "ciclovias-source",
-          lineColor: const Color(0xFF38BDF8).value, // sky-400
-          lineWidth: 5.0,
-          lineOpacity: 0.85,
-        ),
-      );
-      debugPrint("✅ Capa principal agregada");
-      // Línea central más clara para dar sensación de carril
-      await style.addLayer(
-        LineLayer(
-          id: "ciclovias-center-layer",
-          sourceId: "ciclovias-source",
-          lineColor: const Color(
-            0xFFBAE6FD,
-          ).value, // sky-200 (casi blanco celeste)
-          lineWidth: 1.5,
-          lineOpacity: 0.7,
-        ),
-      );
-      debugPrint("✅ Capa central agregada");
+      for (final l in _cicloviaLayers()) {
+        await style.addLayer(l);
+      }
+      debugPrint("✅ Capas de ciclovías agregadas");
       _cicloviasGeoJson = geoJson;
       CacheService.saveCiclovias(geoJson); // Persistir en disco
       _cicloviasAdded = true;
@@ -5161,6 +5363,225 @@ class _MapPageState extends State<MapPage> {
     );
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  //  BÚSQUEDA DE DESTINO — Mapbox Geocoding (sin backend propio)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  Future<List<_GeoResult>> _geocodePlaces(String query) async {
+    if (query.trim().length < 3) return [];
+    // Sesgar resultados hacia la ubicación del usuario (o centro de Santiago).
+    final prox = _lastPosition != null
+        ? '${_lastPosition!.longitude},${_lastPosition!.latitude}'
+        : '-70.6483,-33.4569';
+    final url =
+        'https://api.mapbox.com/geocoding/v5/mapbox.places/'
+        '${Uri.encodeComponent(query.trim())}.json'
+        '?access_token=$kMapboxToken'
+        '&country=cl&language=es&limit=6&proximity=$prox';
+    try {
+      final res = await http.get(Uri.parse(url));
+      if (res.statusCode != 200) return [];
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      final feats = (body['features'] as List?) ?? [];
+      return feats.map((f) {
+        final m = f as Map<String, dynamic>;
+        final center = m['center'] as List; // [lng, lat]
+        return _GeoResult(
+          name: (m['text'] ?? '') as String,
+          fullName: (m['place_name'] ?? '') as String,
+          lng: (center[0] as num).toDouble(),
+          lat: (center[1] as num).toDouble(),
+        );
+      }).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  void _openPlaceSearch() {
+    final controller = TextEditingController();
+    Timer? debounce;
+    List<_GeoResult> results = [];
+    bool loading = false;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) {
+        return StatefulBuilder(
+          builder: (sheetCtx, setSheet) {
+            void runSearch(String q) {
+              debounce?.cancel();
+              if (q.trim().length < 3) {
+                setSheet(() {
+                  results = [];
+                  loading = false;
+                });
+                return;
+              }
+              setSheet(() => loading = true);
+              debounce = Timer(const Duration(milliseconds: 400), () async {
+                final r = await _geocodePlaces(q);
+                setSheet(() {
+                  results = r;
+                  loading = false;
+                });
+              });
+            }
+
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
+              ),
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: Color(0xF5080810),
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 4,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    TextField(
+                      controller: controller,
+                      autofocus: true,
+                      onChanged: runSearch,
+                      textInputAction: TextInputAction.search,
+                      style: const TextStyle(
+                        fontFamily: 'Poppins',
+                        color: Colors.white,
+                        fontSize: 14,
+                      ),
+                      decoration: InputDecoration(
+                        hintText: '¿A dónde quieres ir?',
+                        hintStyle: const TextStyle(
+                          fontFamily: 'Poppins',
+                          color: Colors.white38,
+                          fontSize: 14,
+                        ),
+                        prefixIcon: const Icon(
+                          Icons.search,
+                          color: Colors.greenAccent,
+                          size: 20,
+                        ),
+                        suffixIcon: loading
+                            ? const Padding(
+                                padding: EdgeInsets.all(12),
+                                child: SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    color: Colors.greenAccent,
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                              )
+                            : null,
+                        filled: true,
+                        fillColor: Colors.white.withOpacity(0.06),
+                        contentPadding: const EdgeInsets.symmetric(
+                          vertical: 12,
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    if (results.isEmpty &&
+                        !loading &&
+                        controller.text.trim().length >= 3)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 18),
+                        child: Text(
+                          'Sin resultados. Prueba con otro nombre.',
+                          style: TextStyle(
+                            fontFamily: 'Poppins',
+                            color: Colors.white38,
+                            fontSize: 13,
+                          ),
+                        ),
+                      )
+                    else if (results.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 18),
+                        child: Text(
+                          'Escribe una calle, plaza o lugar de Santiago',
+                          style: TextStyle(
+                            fontFamily: 'Poppins',
+                            color: Colors.white38,
+                            fontSize: 13,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      )
+                    else
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: MediaQuery.of(sheetCtx).size.height * 0.4,
+                        ),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: results.length,
+                          separatorBuilder: (_, _) =>
+                              const Divider(color: Colors.white10, height: 1),
+                          itemBuilder: (_, i) {
+                            final r = results[i];
+                            return ListTile(
+                              dense: true,
+                              leading: const Icon(
+                                Icons.place,
+                                color: Colors.redAccent,
+                                size: 20,
+                              ),
+                              title: Text(
+                                r.name,
+                                style: const TextStyle(
+                                  fontFamily: 'Poppins',
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              subtitle: Text(
+                                r.fullName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontFamily: 'Poppins',
+                                  color: Colors.white54,
+                                  fontSize: 11,
+                                ),
+                              ),
+                              onTap: () {
+                                debounce?.cancel();
+                                _navigateTo(r.lat, r.lng, r.name);
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _navigateTo(double destLat, double destLng, String name) async {
     if (!mounted) return;
     Navigator.pop(context); // Cierra el modal
@@ -5889,6 +6310,168 @@ class _RouteWp {
   final double lng;
   final String label;
   const _RouteWp({required this.lat, required this.lng, required this.label});
+}
+
+/// Popup estilo "Pokémon GO" que pregunta si el usuario es pasajero
+/// (auto/micro/metro) cuando la velocidad es demasiado alta para ir en bici.
+class _PassengerPrompt extends StatelessWidget {
+  final int speedKmh;
+  const _PassengerPrompt({required this.speedKmh});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: TweenAnimationBuilder<double>(
+        duration: const Duration(milliseconds: 320),
+        curve: Curves.elasticOut,
+        tween: Tween(begin: 0.7, end: 1.0),
+        builder: (_, scale, child) =>
+            Transform.scale(scale: scale, child: child),
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 28),
+          padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0xFF12213A), Color(0xFF0A0A14)],
+            ),
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: Colors.lightBlueAccent.withOpacity(0.4)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.lightBlueAccent.withOpacity(0.25),
+                blurRadius: 40,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Badge de velocidad pulsante
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.redAccent.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(30),
+                  border: Border.all(color: Colors.redAccent.withOpacity(0.5)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.speed_rounded,
+                        color: Colors.redAccent, size: 18),
+                    const SizedBox(width: 6),
+                    Text(
+                      '$speedKmh km/h',
+                      style: const TextStyle(
+                        fontFamily: 'Poppins',
+                        color: Colors.redAccent,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                '¡Vas muy rápido! 🏎️',
+                style: TextStyle(
+                  fontFamily: 'Poppins',
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Eso es mucho para ir pedaleando.\n¿Vas como pasajero?',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontFamily: 'Poppins',
+                  color: Colors.white60,
+                  fontSize: 13,
+                  height: 1.35,
+                ),
+              ),
+              const SizedBox(height: 22),
+              Row(
+                children: [
+                  _vehicleOption(context, '🚗', 'Auto', 'auto'),
+                  const SizedBox(width: 10),
+                  _vehicleOption(context, '🚌', 'Micro', 'micro'),
+                  const SizedBox(width: 10),
+                  _vehicleOption(context, '🚇', 'Metro', 'metro'),
+                ],
+              ),
+              const SizedBox(height: 14),
+              TextButton.icon(
+                onPressed: () => Navigator.pop(context, 'bici'),
+                icon: const Text('🚴', style: TextStyle(fontSize: 16)),
+                label: const Text(
+                  'No, sigo pedaleando',
+                  style: TextStyle(
+                    fontFamily: 'Poppins',
+                    color: Colors.greenAccent,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _vehicleOption(
+      BuildContext context, String emoji, String label, String value) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => Navigator.pop(context, value),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          decoration: BoxDecoration(
+            color: Colors.lightBlueAccent.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.lightBlueAccent.withOpacity(0.25)),
+          ),
+          child: Column(
+            children: [
+              Text(emoji, style: const TextStyle(fontSize: 30)),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                style: const TextStyle(
+                  fontFamily: 'Poppins',
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Resultado de búsqueda de lugar (geocoding de Mapbox).
+class _GeoResult {
+  final String name;
+  final String fullName;
+  final double lat;
+  final double lng;
+  const _GeoResult({
+    required this.name,
+    required this.fullName,
+    required this.lat,
+    required this.lng,
+  });
 }
 
 /// Indicador visual que se expande al hacer long press en el mapa.
