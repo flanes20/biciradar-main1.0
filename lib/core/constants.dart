@@ -1,5 +1,5 @@
 // Reemplaza con tu token de Mapbox (https://account.mapbox.com)
-const kMapboxToken = '';
+const kMapboxToken = ;
 
 // Estilos SIN capa de tráfico (los "navigation-*" pintaban las calles de
 // autos en verde/naranjo/rojo y se confundían con las ciclovías).
