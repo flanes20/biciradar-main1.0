@@ -4485,16 +4485,32 @@ class _MapPageState extends State<MapPage> {
     if (_bikeParkingsLoading) return;
     setState(() => _bikeParkingsLoading = true);
     try {
-      final p = _lastPosition;
-      final bbox = p != null
-          ? '(${p.latitude - 0.12},${p.longitude - 0.12},'
-              '${p.latitude + 0.12},${p.longitude + 0.12})'
-          : '(-33.70,-70.95,-33.30,-70.45)';
-      final query = '[out:json][timeout:25];'
-          '(node["amenity"="bicycle_parking"]$bbox;'
-          'way["amenity"="bicycle_parking"]$bbox;);'
-          'out center;';
-      final elements = await _fetchOverpass(query);
+      List? elements;
+      // 1) Datos empacados en la app (instantáneo, offline y para todos por
+      //    igual). Overpass en vivo fallaba en redes móviles, por lo que los
+      //    estacionamientos no aparecían en algunos teléfonos.
+      try {
+        final raw = await rootBundle
+            .loadString('assets/data/bike_parkings_scl.json');
+        final decoded = jsonDecode(raw);
+        elements = (decoded is Map ? decoded['elements'] : decoded) as List?;
+        debugPrint('🅿️ Parkings empacados: ${elements?.length ?? 0}');
+      } catch (e) {
+        debugPrint('⚠️ No se pudo leer el asset de parkings: $e');
+      }
+      // 2) Respaldo: si no hay asset, intentar Overpass en vivo.
+      if (elements == null || elements.isEmpty) {
+        final p = _lastPosition;
+        final bbox = p != null
+            ? '(${p.latitude - 0.12},${p.longitude - 0.12},'
+                '${p.latitude + 0.12},${p.longitude + 0.12})'
+            : '(-33.70,-70.95,-33.30,-70.45)';
+        final query = '[out:json][timeout:25];'
+            '(node["amenity"="bicycle_parking"]$bbox;'
+            'way["amenity"="bicycle_parking"]$bbox;);'
+            'out center;';
+        elements = await _fetchOverpass(query);
+      }
       if (elements != null) {
         _bikeParkings = elements.map<Map<String, dynamic>>((e) {
           double lat = 0, lng = 0;
@@ -4547,8 +4563,11 @@ class _MapPageState extends State<MapPage> {
       sourceId: _parkingSrcId,
       iconImage: _parkingIconId,
       iconSize: 0.35,
-      iconAllowOverlap: true,
-      iconIgnorePlacement: true,
+      // Detección de colisiones: Mapbox oculta los pines que se encimarían y
+      // muestra un conjunto representativo y legible en cualquier zoom (ni
+      // amontonado ni vacío). Al acercarse aparecen más.
+      iconAllowOverlap: false,
+      iconIgnorePlacement: false,
     ));
   }
 
@@ -4679,8 +4698,8 @@ class _MapPageState extends State<MapPage> {
       sourceId: _bicimetroSrcId,
       iconImage: _bicimetroIconId,
       iconSize: 0.35,
-      iconAllowOverlap: true,
-      iconIgnorePlacement: true,
+      iconAllowOverlap: false,
+      iconIgnorePlacement: false,
     ));
   }
 
@@ -5079,8 +5098,9 @@ class _MapPageState extends State<MapPage> {
       iconImage: 'svc-icon-repair', // se sobreescribe por feature abajo
       iconSize: 0.42,
       iconAnchor: IconAnchor.BOTTOM, // la punta del pin marca el lugar
-      iconAllowOverlap: true,
-      iconIgnorePlacement: true,
+      // Colisión: declutter automático sin desaparecer del todo al alejarse.
+      iconAllowOverlap: false,
+      iconIgnorePlacement: false,
     ));
     // Ícono según la categoría de cada punto.
     await style.setStyleLayerProperty(
@@ -5280,8 +5300,8 @@ class _MapPageState extends State<MapPage> {
       iconImage: 'crv-icon',
       iconSize: 0.42,
       iconAnchor: IconAnchor.BOTTOM,
-      iconAllowOverlap: true,
-      iconIgnorePlacement: true,
+      iconAllowOverlap: false,
+      iconIgnorePlacement: false,
     ));
   }
 

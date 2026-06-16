@@ -49,6 +49,7 @@ flutter:
     - assets/icono_ciclista.png
     - assets/brands/copec.png
     - assets/data/bike_services_scl.json
+    - assets/data/bike_parkings_scl.json
     - assets/data/ciclovias_scl.json
     - assets/data/ciclorecreovia.json
 
